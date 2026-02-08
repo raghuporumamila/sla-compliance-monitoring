@@ -7,108 +7,93 @@ from google.cloud import monitoring_v3
 client = monitoring_v3.MetricServiceClient()
 
 
-def get_count(project_id, filter_base, interval, extra_filter=""):
-    project_path = f"projects/{project_id}"
-    print("Filter == {}".format(filter_base + extra_filter))
-    results = client.list_time_series(
-        request={
-            "name": project_path,
-            "filter": filter_base + extra_filter,
-            "interval": interval,
-            "view": monitoring_v3.ListTimeSeriesRequest.TimeSeriesView.FULL,
-        }
-    )
-
-    # Sum up all points in the time series
-    total = 0
-    for series in results:
-        for point in series.points:
-            total += point.value.int64_value
-    return total
-
-
-def get_sla_metrics(project_id, service_type, service_name, start_time, end_time):
-    project_name = f"projects/{project_id}"
-
-    # Configuration (Logic remains the same)
+def get_configs(service_name, service_type, metric_path, threshold):
     configs = {
         'cloud_run_revision': {
-            'total_metric': 'run.googleapis.com/request_count',
-            'filter_base': f'resource.type="cloud_run_revision" AND resource.labels.service_name="{service_name}"',
+            'total_metric': f"{metric_path}",
+            'filter_base': f'resource.type="{service_type}" AND resource.labels.service_name="{service_name}"',
             'error_filter': 'metric.labels.response_code_class="5xx"',
-            'threshold': 0.01,
+            'threshold': threshold,
             'min_reqs': 100
         },
         'bigquery_project': {
-            'total_metric': 'bigquery.googleapis.com/query/count',
-            'filter_base': 'resource.type="bigquery_project"',
+            'total_metric': f"{metric_path}",
+            'filter_base': f'resource.type="{service_type}"',
             # Shift to identifying success to avoid the 'statement_status' label error
             'success_filter': 'metric.labels.statement_status="ok"',
-            'threshold': 0.10,
+            'threshold': threshold,
             'min_reqs': 20
         },
         'gcs_bucket': {
-            'total_metric': 'storage.googleapis.com/api/request_count',
-            'filter_base': f'resource.type="gcs_bucket" AND resource.labels.bucket_name="{service_name}"',
+            'total_metric': f"{metric_path}",
+            f'filter_base': f'resource.type="{service_type}" AND resource.labels.bucket_name="{service_name}"',
             'error_filter': 'metric.labels.response_code=starts_with("5")',
-            'threshold': 0.01,
+            'threshold': threshold,
             'min_reqs': 1
         }
     }
+    return configs
 
-    conf = configs[service_type]
 
-    # Define the Aggregation object correctly
-    aggregation = monitoring_v3.Aggregation({
-        "alignment_period": {"seconds": 60},  # 1-minute windows
-        "per_series_aligner": monitoring_v3.Aggregation.Aligner.ALIGN_SUM,
-    })
+def fetch_points(project_id, start_time, end_time, full_filter):
+    project_name = f"projects/{project_id}"
+    try:
+        # Define the Aggregation object correctly
+        aggregation = monitoring_v3.Aggregation({
+            "alignment_period": {"seconds": 60},  # 1-minute windows
+            "per_series_aligner": monitoring_v3.Aggregation.Aligner.ALIGN_SUM,
+        })
 
-    interval = monitoring_v3.TimeInterval({
-        "start_time": {"seconds": int(start_time)},
-        "end_time": {"seconds": int(end_time)},
-    })
+        interval = monitoring_v3.TimeInterval({
+            "start_time": {"seconds": int(start_time)},
+            "end_time": {"seconds": int(end_time)},
+        })
+        results = client.list_time_series(
+            request={
+                "name": project_name,
+                "filter": full_filter,
+                "interval": interval,
+                "view": monitoring_v3.ListTimeSeriesRequest.TimeSeriesView.FULL,
+                "aggregation": aggregation
+            }
+        )
 
-    def fetch_points(full_filter):
-        try:
-            results = client.list_time_series(
-                request={
-                    "name": project_name,
-                    "filter": full_filter,
-                    "interval": interval,
-                    "view": monitoring_v3.ListTimeSeriesRequest.TimeSeriesView.FULL,
-                    "aggregation": aggregation
-                }
-            )
+        points_map = {}
+        for ts in results:
+            for p in ts.points:
+                # Convert DatetimeWithNanoseconds to a Unix timestamp integer
+                ts_seconds = int(p.interval.start_time.timestamp())
 
-            points_map = {}
-            for ts in results:
-                for p in ts.points:
-                    # Convert DatetimeWithNanoseconds to a Unix timestamp integer
-                    ts_seconds = int(p.interval.start_time.timestamp())
+                # Extract value correctly
+                val = p.value.double_value if 'double_value' in str(p.value) else p.value.int64_value
+                points_map[ts_seconds] = points_map.get(ts_seconds, 0) + val
+        return points_map
+    except exceptions.NotFound:
+        # If the metric or label doesn't exist yet, it means 0 data points
+        print(f"Note: No data found for filter: {full_filter}")
+        return {}
 
-                    # Extract value correctly
-                    val = p.value.double_value if 'double_value' in str(p.value) else p.value.int64_value
-                    points_map[ts_seconds] = points_map.get(ts_seconds, 0) + val
-            return points_map
-        except exceptions.NotFound:
-            # If the metric or label doesn't exist yet, it means 0 data points
-            print(f"Note: No data found for filter: {full_filter}")
-            return {}
 
-    total_data = fetch_points(f'metric.type="{conf["total_metric"]}" AND {conf["filter_base"]}')
+def get_sla_metrics(project_id, service_type, service_name, metric_path, threshold, start_time, end_time):
+    print("service_name == {}, service_type == {}".format(service_type, service_name))
+    # Configuration (Logic remains the same)
+    conf = get_configs(service_name, service_type, metric_path, threshold)[service_type]
+
+    total_data = fetch_points(project_id, start_time, end_time,
+                              f'metric.type="{conf["total_metric"]}" AND {conf["filter_base"]}')
+
     error_data = {}
     if service_type == 'bigquery_project':
         # For BQ: Errors = Total - Successes
-        success_data = fetch_points(
-            f'metric.type="{conf["total_metric"]}" AND {conf["filter_base"]} AND {conf["success_filter"]}')
+        success_data = fetch_points(project_id, start_time, end_time,
+                                    f'metric.type="{conf["total_metric"]}" AND {conf["filter_base"]} AND {conf["success_filter"]}')
         for t, total in total_data.items():
             successes = success_data.get(t, 0)
             error_data[t] = total - successes
     else:
         # For Run and GCS: Fetch errors directly
-        error_data = fetch_points(
-            f'metric.type="{conf["total_metric"]}" AND {conf["filter_base"]} AND {conf["error_filter"]}')
+        error_data = fetch_points(project_id, start_time, end_time,
+                                  f'metric.type="{conf["total_metric"]}" AND {conf["filter_base"]} AND {conf["error_filter"]}')
 
     # Calculation logic
     total_minutes_in_period = int((end_time - start_time) / 60)
@@ -131,7 +116,7 @@ def get_compliance_report(project_id, service_name, metric_type, metric_path, th
     end_ts = time.time()
     start_ts = end_ts - (30 * 24 * 60 * 60)
 
-    uptime, mins = get_sla_metrics(project_id, metric_type, service_name, start_ts, end_ts)
+    uptime, mins = get_sla_metrics(project_id, metric_type, service_name, metric_path, threshold, start_ts, end_ts)
     print(f"Uptime: {uptime}% | Downtime: {mins} minutes")
 
 
