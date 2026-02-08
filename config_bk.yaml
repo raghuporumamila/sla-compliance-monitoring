@@ -1,0 +1,12 @@
+
+
+
+
+  - id: "legacy-vm-cluster"
+    display_name: "Legacy ERP"
+    services:
+      - name: "primary-vm-instance"
+        type: "compute_engine"
+        # Compute Engine single-instance SLA is often lower than clusters [cite: 17]
+        threshold: 99.5
+        metric_path: "compute.googleapis.com/instance/uptime"
