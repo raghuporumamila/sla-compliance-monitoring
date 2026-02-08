@@ -1,105 +1,138 @@
-import yaml
-from datetime import datetime, timedelta
-
-from google.cloud import monitoring_v3
 import time
 
+import yaml
+from google.api_core import exceptions
+from google.cloud import monitoring_v3
 
-def calculate_uptime_percentage(project_id, service_name, type, metric_path):
-    client = monitoring_v3.MetricServiceClient()
+client = monitoring_v3.MetricServiceClient()
+
+
+def get_count(project_id, filter_base, interval, extra_filter=""):
     project_path = f"projects/{project_id}"
-
-    # 30-day interval
-    now = time.time()
-    seconds = int(now)
-    nanos = int((now - seconds) * 10 ** 9)
-    interval = monitoring_v3.TimeInterval(
-        {
-            "end_time": {"seconds": seconds, "nanos": nanos},
-            "start_time": {"seconds": seconds - (2 * 24 * 60 * 60), "nanos": nanos},
+    print("Filter == {}".format(filter_base + extra_filter))
+    results = client.list_time_series(
+        request={
+            "name": project_path,
+            "filter": filter_base + extra_filter,
+            "interval": interval,
+            "view": monitoring_v3.ListTimeSeriesRequest.TimeSeriesView.FULL,
         }
     )
 
-    # Filter for the specific Cloud Run service
-    if type == 'cloud_run_revision':
-        filter_base = (
-            f'resource.type = "{type}" AND '
-            f'resource.labels.service_name = "{service_name}" AND '
-            f'metric.type = "{metric_path}"'
-        )
-    elif type == 'gcs_bucket':
-        filter_base = (
-            f'resource.type = "{type}" AND '
-            f'metric.type = "{metric_path}" AND '
-            f'resource.labels.bucket_name = "{service_name}"'
-        )
-    elif type == 'bigquery':
-        f'resource.type = "{type}" AND '
-        f'metric.type = "{metric_path}"'
+    # Sum up all points in the time series
+    total = 0
+    for series in results:
+        for point in series.points:
+            total += point.value.int64_value
+    return total
 
-    #run.googleapis.com/request_count
 
-    def get_count(extra_filter=""):
-        print("Filter == {}".format(filter_base + extra_filter))
-        results = client.list_time_series(
-            request={
-                "name": project_path,
-                "filter": filter_base + extra_filter,
-                "interval": interval,
-                "view": monitoring_v3.ListTimeSeriesRequest.TimeSeriesView.FULL,
-            }
-        )
-
-        # Sum up all points in the time series
-        total = 0
-        for series in results:
-            for point in series.points:
-                total += point.value.int64_value
-        return total
-
-    total_reqs = get_count()
-    print('total_reqs : {}'.format(total_reqs))
-    # Filter specifically for server-side errors (5xx)
-    error_reqs = None
-    if type == 'cloud_run_revision':
-        error_reqs = get_count(' AND metric.labels.response_code_class = "5xx"')
-    elif type == 'gcs_bucket':
-        error_reqs = get_count(' AND metric.labels.response_code = starts_with("5")')
-
-    print('error_reqs : {}'.format(error_reqs))
-
-    if total_reqs == 0:
-        return 100.0  # Assume 100% if no traffic exists
-
-    # SLA Formula: 1 - (Errors / Total)
-    uptime_percentage = (1 - (error_reqs / total_reqs)) * 100
-    return round(uptime_percentage, 2)
-
-def get_compliance_report(project_id, service_name, type, metric_path, threshold):
-    client = monitoring_v3.MetricServiceClient()
+def get_sla_metrics(project_id, service_type, service_name, start_time, end_time):
     project_name = f"projects/{project_id}"
 
-    # Define timeframe (e.g., last 30 days)
-    now = datetime.utcnow()
-    start_time = now - timedelta(days=30)
-
-    # Metric: Cloud Run Request Count
-    # We filter by response_code_class to identify 5xx errors
-    # Logic: 1 - (Sum of 5xx / Total Requests)
-
-
-    # (Implementation of metric aggregation logic here)
-    #uptime_pct = 99.98  # Placeholder for calculated value
-    uptime_pct = calculate_uptime_percentage(project_id, service_name, type, metric_path)
-
-    status = "✅ COMPLIANT" if uptime_pct >= threshold else "❌ NON-COMPLIANT"
-
-    return {
-        "service": service_name,
-        "uptime": f"{uptime_pct}%",
-        "threshold": f"{threshold}%",
-        "status": status
+    # Configuration (Logic remains the same)
+    configs = {
+        'cloud_run_revision': {
+            'total_metric': 'run.googleapis.com/request_count',
+            'filter_base': f'resource.type="cloud_run_revision" AND resource.labels.service_name="{service_name}"',
+            'error_filter': 'metric.labels.response_code_class="5xx"',
+            'threshold': 0.01,
+            'min_reqs': 100
+        },
+        'bigquery_project': {
+            'total_metric': 'bigquery.googleapis.com/query/count',
+            'filter_base': 'resource.type="bigquery_project"',
+            # Shift to identifying success to avoid the 'statement_status' label error
+            'success_filter': 'metric.labels.statement_status="ok"',
+            'threshold': 0.10,
+            'min_reqs': 20
+        },
+        'gcs_bucket': {
+            'total_metric': 'storage.googleapis.com/api/request_count',
+            'filter_base': f'resource.type="gcs_bucket" AND resource.labels.bucket_name="{service_name}"',
+            'error_filter': 'metric.labels.response_code=starts_with("5")',
+            'threshold': 0.01,
+            'min_reqs': 1
+        }
     }
+
+    conf = configs[service_type]
+
+    # Define the Aggregation object correctly
+    aggregation = monitoring_v3.Aggregation({
+        "alignment_period": {"seconds": 60},  # 1-minute windows
+        "per_series_aligner": monitoring_v3.Aggregation.Aligner.ALIGN_SUM,
+    })
+
+    interval = monitoring_v3.TimeInterval({
+        "start_time": {"seconds": int(start_time)},
+        "end_time": {"seconds": int(end_time)},
+    })
+
+    def fetch_points(full_filter):
+        try:
+            results = client.list_time_series(
+                request={
+                    "name": project_name,
+                    "filter": full_filter,
+                    "interval": interval,
+                    "view": monitoring_v3.ListTimeSeriesRequest.TimeSeriesView.FULL,
+                    "aggregation": aggregation
+                }
+            )
+
+            points_map = {}
+            for ts in results:
+                for p in ts.points:
+                    # Convert DatetimeWithNanoseconds to a Unix timestamp integer
+                    ts_seconds = int(p.interval.start_time.timestamp())
+
+                    # Extract value correctly
+                    val = p.value.double_value if 'double_value' in str(p.value) else p.value.int64_value
+                    points_map[ts_seconds] = points_map.get(ts_seconds, 0) + val
+            return points_map
+        except exceptions.NotFound:
+            # If the metric or label doesn't exist yet, it means 0 data points
+            print(f"Note: No data found for filter: {full_filter}")
+            return {}
+
+    total_data = fetch_points(f'metric.type="{conf["total_metric"]}" AND {conf["filter_base"]}')
+    error_data = {}
+    if service_type == 'bigquery_project':
+        # For BQ: Errors = Total - Successes
+        success_data = fetch_points(
+            f'metric.type="{conf["total_metric"]}" AND {conf["filter_base"]} AND {conf["success_filter"]}')
+        for t, total in total_data.items():
+            successes = success_data.get(t, 0)
+            error_data[t] = total - successes
+    else:
+        # For Run and GCS: Fetch errors directly
+        error_data = fetch_points(
+            f'metric.type="{conf["total_metric"]}" AND {conf["filter_base"]} AND {conf["error_filter"]}')
+
+    # Calculation logic
+    total_minutes_in_period = int((end_time - start_time) / 60)
+    downtime_minutes = 0
+
+    for t in range(int(start_time), int(end_time), 60):
+        total = total_data.get(t, 0)
+        errors = error_data.get(t, 0)
+
+        if total >= conf['min_reqs']:
+            if (errors / total) > conf['threshold']:
+                downtime_minutes += 1
+
+    uptime_pct = ((total_minutes_in_period - downtime_minutes) / total_minutes_in_period) * 100
+    return round(uptime_pct, 4), downtime_minutes
+
+
+def get_compliance_report(project_id, service_name, metric_type, metric_path, threshold):
+    # Get last 30 days
+    end_ts = time.time()
+    start_ts = end_ts - (30 * 24 * 60 * 60)
+
+    uptime, mins = get_sla_metrics(project_id, metric_type, service_name, start_ts, end_ts)
+    print(f"Uptime: {uptime}% | Downtime: {mins} minutes")
 
 
 # Load team configuration [cite: 12]
@@ -108,9 +141,8 @@ with open("config.yaml", "r") as f:
 
 for project in config['projects']:
     for service in project['services']:
-        report = get_compliance_report(project['id'],
-                                       service['name'],
-                                       service['type'],
-                                       service['metric_path'],
-                                       service['threshold'])
-        print(f"| {report['service']} | {report['uptime']} | {report['status']} |")
+        get_compliance_report(project['id'],
+                              service['name'],
+                              service['type'],
+                              service['metric_path'],
+                              service['threshold'])

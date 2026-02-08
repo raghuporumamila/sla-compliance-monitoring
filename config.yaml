@@ -21,7 +21,7 @@ projects:
         metric_path: "storage.googleapis.com/api/request_count"
 
       - name: "daily-etl-jobs"
-        type: "bigquery"
+        type: "bigquery_project"
         # BigQuery high-availability threshold [cite: 17]
         threshold: 99.9
         metric_path: "bigquery.googleapis.com/query/count"
