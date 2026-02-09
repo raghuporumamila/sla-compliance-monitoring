@@ -1,34 +1,29 @@
-# GCP SLA Compliance Monitoring Configuration
-# This file allows the team to manage multiple projects and services in one place.
-
+# GCP SLA Compliance Monitoring Configuration 2026
 global_settings:
-  reporting_period_days: 30  # Standard monthly SLA window
-  output_format: "markdown"   # Options: markdown, json, csv
+  reporting_period_days: 30
+  output_format: "markdown"
+
 projects:
   - id: "event-hub-317019"
     display_name: "event-hub"
     services:
       - name: "hello"
         type: "cloud_run_revision"
-        # SLA: 99.95% is standard for Cloud Run [cite: 17]
+        # Official SLA: 99.95%. Downtime = >1% Error Rate
         threshold: 0.01
+        min_reqs: 100
         metric_path: "run.googleapis.com/request_count"
 
       - name: "event-hub-317019-datalake"
         type: "gcs_bucket"
-        # Standard storage availability often targets 99.9% [cite: 17]
+        # GCS Regional SLA: 99.9%. Downtime = >1% Error Rate
         threshold: 0.01
+        min_reqs: 1
         metric_path: "storage.googleapis.com/api/request_count"
 
       - name: "daily-etl-jobs"
         type: "bigquery_project"
-        # BigQuery high-availability threshold [cite: 17]
+        # BigQuery SLA: 99.99%. Downtime = >10% Error Rate
         threshold: 0.10
+        min_reqs: 20
         metric_path: "bigquery.googleapis.com/query/count"
-
-# Notification channels (optional enhancement)
-notifications:
-  - type: "email"
-    recipients: ["devops-alerts@example.com"]
-  - type: "slack"
-    webhook_url: "${SLACK_WEBHOOK_URL}"
