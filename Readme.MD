@@ -9,7 +9,7 @@ cloud run or GKE.
 is running on cloud run
 - once the compliance reporting service and db are setup then plafform team sets up cloud scheduler to schedule the
 compliance reports
-- Now cloud run invokes the cloud run api service to run the report
+- Now cloud scheduler invokes the cloud run api service to run the report
 - API service after generating the report it stores in the DB and also notifies to notification channels
 - Now Compliance user can view the reports on the UI or they can receive via emails
 
