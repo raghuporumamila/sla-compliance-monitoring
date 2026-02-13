@@ -7,7 +7,7 @@ cloud run or GKE.
 - gitlab picks up the changes and updates them to cloud storage location
 - Platform team creates the necessary firestore db infrastructure for storing the compliance reporting application that 
 is running on cloud run
-- once the compliance reporting service and db are setup then plafform team sets up cloud scheduler to schedule the
+- once the compliance reporting service and db are setup then platform team sets up cloud scheduler to schedule the
 compliance reports
 - Now cloud scheduler invokes the cloud run api service to run the report
 - API service after generating the report it stores in the DB and also notifies to notification channels
