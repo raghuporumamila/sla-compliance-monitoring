@@ -788,9 +788,6 @@ gcloud projects update PROJECT_ID --update-labels=compliance=sla-monitoring
 
 ---
 
-## License
-
-*Add your license information here*
 
 ## Changelog
 
