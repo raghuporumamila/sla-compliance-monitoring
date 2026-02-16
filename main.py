@@ -72,7 +72,60 @@ def fetch_aligned_series(project_id, start_time, end_time, full_filter):
 
 
 def get_sla_metrics(project_id, service_type, service_name, start_time, end_time):
-    """Calculates uptime percentage based on SLA logic."""
+    """This Python function is a specialized tool for calculating the **Service Level Agreement (SLA) Uptime Percentage** for Google Cloud Platform (GCP) resources.
+
+        Instead of just checking if a server is "up" or "down," it uses request metrics to determine if a service was effectively unavailable during specific one-minute windows.
+
+        ---
+
+        ### 1. Configuration Mapping
+
+        The function starts by defining how to talk to Google Cloud Monitoring for three specific services. It maps each `service_type` to its corresponding metric name and resource filter:
+
+        | Service Type | Metric Tracked | "Bad" Outcome |
+        | --- | --- | --- |
+        | **Cloud Run** | Request Count | 5xx Response Codes |
+        | **GCS Bucket** | API Request Count | 500 Response Codes |
+        | **BigQuery** | Query Count | Anything *not* "SUCCEEDED" |
+
+        ### 2. Data Fetching
+
+        It calls a helper function (presumably defined elsewhere) `fetch_aligned_series` to pull raw data for the specified time range. It fetches two sets of data:
+
+        * **Total Data:** All requests/operations that occurred.
+        * **Success/Error Data:** Specifically identifies the failed attempts (or successful ones for BigQuery).
+
+        ### 3. The "Downtime" Logic
+
+        This is the core of the function. It iterates through the time range in **60-second increments** (1-minute buckets).
+
+        For each minute:
+
+        1. **Check Activity:** If there were no requests (`total < 1`), the minute is ignored (it doesn't count as downtime).
+        2. **Calculate Error Rate:** It determines the ratio of errors to total requests.
+        3. **The "100% Failure" Rule:** A minute is only counted as `downtime_minutes` if **100% of requests failed** ().
+
+        > **Note:** This is a strict SLA definition. If 99% of requests fail in a minute, this specific function still considers that minute "up."
+        It only triggers downtime if the service is completely unresponsive or erroring for every single call.
+
+        ### 4. Final Calculation
+
+        Finally, it converts that downtime into a percentage:
+
+
+        It returns the **percentage** (rounded to 4 decimal places) and the **total count of downtime minutes**.
+
+        ---
+
+        ### Example Scenario
+
+        If you monitor a Cloud Run service for 1 hour (60 minutes):
+
+        * **58 minutes:** All requests succeeded.
+        * **1 minute:** 50% of requests failed (Result: **Not downtime**).
+        * **1 minute:** 100% of requests failed (Result: **1 minute downtime**).
+        * **Result:**  uptime.
+"""
     configs = {
         'cloud_run_revision': {
             'total_metric': 'run.googleapis.com/request_count',
